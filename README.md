@@ -75,16 +75,32 @@ transcript header; use `ocs export` for full ids).
 ### Git sync (sessions via GitHub or any remote)
 
 ```bash
+ocs sync init [--repo r] --endpoint <git url> [--name n] [--ssh-key path | --token pat] [--create]
 ocs sync push [--repo r] [--session id]... [--no-push]
 ocs sync pull [--repo r] [--overwrite] [--no-pull]
 ocs sync status [--repo r]
 ```
 
+**Setup is ocs-owned:** you only provide a git endpoint, a repo name, and one
+credential. `sync init` verifies git is installed, probes the endpoint
+(`git ls-remote`), optionally creates the repo via the GitHub API
+(`--create`, needs an https endpoint + PAT; repos are created **private**),
+wires `origin`, and saves everything to ocs's own config
+(`$XDG_CONFIG_HOME/ocs/config.json`, mode 0600).
+
+Credentials are injected into git per command — never written into the sync
+repo's `.git/config`:
+
+- ssh key → `GIT_SSH_COMMAND="ssh -i <key> -o IdentitiesOnly=yes"`
+- https token → `http.extraHeader=Authorization: Basic base64(x-access-token:<pat>)`
+
+git itself is **not bundled** (platform-specific bloat; pure-JS alternatives
+lack SSH support) — a system `git` on `PATH` is required and detected at init.
+
 `push` exports sessions into a git repo (default `$XDG_DATA_HOME/ocs/repo`,
 override with `OCS_REPO`), commits, and pushes when a remote is configured.
-`pull` fetches from the remote and imports sessions missing locally. Point the
-repo at a GitHub remote once (`git -C <repo> remote add origin ...`) and
-`ocs sync push` / `ocs sync pull` handle the rest.
+`pull` fetches from the remote and imports sessions missing locally.
+Credentials saved by `sync init` are picked up automatically by both.
 
 ### Tools/plugins sync (including node_modules)
 
@@ -106,6 +122,7 @@ is unreliable, so an exact tarball restore beats reinstalling. `.git` and the
 |-----------|------------------------------------------------|----------------------|
 | `OCS_DB`  | `$XDG_DATA_HOME/opencode/opencode.db`          | session store path   |
 | `OCS_REPO`| `$XDG_DATA_HOME/ocs/repo`                      | sync repo path       |
+| `OCS_CONFIG` | `$XDG_CONFIG_HOME/ocs/config.json`          | ocs config (creds)   |
 
 ## Development
 
@@ -124,8 +141,10 @@ Modules (each independently testable):
 | `src/exporter.ts`| export/import session directories               |
 | `src/fork.ts`    | session fork (+ optional git worktree fork)     |
 | `src/edit.ts`    | surgical edits incl. CoT rewriting              |
-| `src/gitsync.ts` | git repo push/pull sync                         |
-| `src/toolssync.ts` | tooling + node_modules sync                   |
+| `src/gitsync.ts` | git repo push/pull sync + credential injection       |
+| `src/syncinit.ts`| `sync init`: endpoint probe, GitHub repo creation    |
+| `src/config.ts`  | ocs-owned 0600 config (endpoint + credentials)       |
+| `src/toolssync.ts` | tooling + node_modules sync                      |
 | `src/cli.ts`     | arg parsing / command dispatch                  |
 
 Warning: write commands modify opencode's live database. opencode should

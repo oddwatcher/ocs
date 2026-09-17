@@ -5,6 +5,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import type { Credential } from "./config.js";
 import { exportSession, importAllSessions, type ImportResult } from "./exporter.js";
 
 export function defaultRepoPath(): string {
@@ -16,8 +17,72 @@ export function resolveRepoPath(explicit?: string): string {
   return explicit ?? process.env.OCS_REPO ?? defaultRepoPath();
 }
 
-function git(repo: string, args: string[]): string {
-  return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+/** Fail fast with a clear message when git is not installed. */
+export function detectGit(): string {
+  try {
+    return execFileSync("git", ["--version"], { encoding: "utf8" }).trim();
+  } catch {
+    throw new Error(
+      "git binary not found. ocs requires git on PATH (bundling git was rejected: " +
+        "platform-specific bloat, no SSH support in pure-JS alternatives).",
+    );
+  }
+}
+
+/**
+ * Per-command credential injection. Secrets are passed via env / -c flags so
+ * they never land in the repo's .git/config:
+ *  - ssh:   GIT_SSH_COMMAND with IdentityFile + IdentitiesOnly
+ *  - https: http.extraHeader with a Basic token (GitHub: x-access-token:<pat>)
+ */
+export function gitAuthArgs(cred?: Credential): string[] {
+  if (cred?.type === "https") {
+    const basic = Buffer.from(`x-access-token:${cred.token}`).toString("base64");
+    return ["-c", `http.extraHeader=Authorization: Basic ${basic}`];
+  }
+  return [];
+}
+
+export function gitAuthEnv(cred?: Credential): NodeJS.ProcessEnv {
+  if (cred?.type === "ssh") {
+    return {
+      ...process.env,
+      GIT_SSH_COMMAND: `ssh -i ${cred.keyPath} -o IdentitiesOnly=yes`,
+    };
+  }
+  return process.env;
+}
+
+function git(repo: string, args: string[], cred?: Credential): string {
+  return execFileSync("git", ["-C", repo, ...gitAuthArgs(cred), ...args], {
+    encoding: "utf8",
+    env: gitAuthEnv(cred),
+  }).trim();
+}
+
+/** Run git outside any repo (e.g. ls-remote against an endpoint). */
+function gitNoRepo(args: string[], cred?: Credential): string {
+  return execFileSync("git", [...gitAuthArgs(cred), ...args], {
+    encoding: "utf8",
+    env: gitAuthEnv(cred),
+  }).trim();
+}
+
+/** Add or update the origin remote. */
+export function wireRemote(repo: string, url: string): void {
+  ensureRepo(repo);
+  if (hasRemote(repo)) git(repo, ["remote", "set-url", "origin", url]);
+  else git(repo, ["remote", "add", "origin", url]);
+}
+
+/** Probe connectivity + auth against an endpoint without a local repo. */
+export function probeRemote(url: string, cred?: Credential): boolean {
+  try {
+    gitNoRepo(["ls-remote", url, "HEAD"], cred);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Create the repo if missing. Returns true when it was just initialized. */
@@ -50,7 +115,7 @@ export interface SyncPushResult {
 export function syncPush(
   db: DatabaseSync,
   repo: string,
-  opts: { sessionIds?: string[]; push?: boolean; message?: string } = {},
+  opts: { sessionIds?: string[]; push?: boolean; message?: string; credential?: Credential } = {},
 ): SyncPushResult {
   ensureRepo(repo);
   const ids =
@@ -62,7 +127,7 @@ export function syncPush(
   const committed = commitAll(repo, opts.message ?? `ocs: export ${ids.length} session(s)`);
   let pushed = false;
   if (committed && opts.push !== false && hasRemote(repo)) {
-    git(repo, ["push", "-u", "origin", "HEAD"]);
+    git(repo, ["push", "-u", "origin", "HEAD"], opts.credential);
     pushed = true;
   }
   return { exported, committed, pushed };
@@ -82,30 +147,30 @@ function hasCommits(repo: string): boolean {
   }
 }
 
-function pullRemote(repo: string): void {
+function pullRemote(repo: string, cred?: Credential): void {
   if (!hasCommits(repo)) {
     // fresh clone-less repo: adopt the remote branch
-    git(repo, ["fetch", "origin"]);
+    git(repo, ["fetch", "origin"], cred);
     try {
-      git(repo, ["reset", "--hard", "origin/HEAD"]);
+      git(repo, ["reset", "--hard", "origin/HEAD"], cred);
     } catch {
-      git(repo, ["reset", "--hard", "origin/main"]);
+      git(repo, ["reset", "--hard", "origin/main"], cred);
     }
     return;
   }
-  git(repo, ["pull", "--ff-only"]);
+  git(repo, ["pull", "--ff-only"], cred);
 }
 
 /** Pull the repo (when it has a remote) and import any sessions missing locally. */
 export function syncPull(
   db: DatabaseSync,
   repo: string,
-  opts: { pull?: boolean; overwrite?: boolean } = {},
+  opts: { pull?: boolean; overwrite?: boolean; credential?: Credential } = {},
 ): SyncPullResult {
   ensureRepo(repo);
   let pulled = false;
   if (opts.pull !== false && hasRemote(repo)) {
-    pullRemote(repo);
+    pullRemote(repo, opts.credential);
     pulled = true;
   }
   const imported = importAllSessions(db, repo, { overwrite: opts.overwrite ?? false });

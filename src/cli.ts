@@ -19,6 +19,8 @@ import {
   replaceInPart,
 } from "./edit.js";
 import { resolveRepoPath, syncPull, syncPush, syncStatus } from "./gitsync.js";
+import { loadConfig } from "./config.js";
+import { syncInit } from "./syncinit.js";
 import { globalToolsSource, listToolsSources, pullToolsSource, pushTools } from "./toolssync.js";
 
 const USAGE = `ocs — opencode session store tool
@@ -38,6 +40,8 @@ Usage:
   ocs edit rm-message <messageId>                      delete message + its parts
   ocs edit rm-part <partId>                            delete a part
   ocs edit archive <session> [--un]                    archive / unarchive
+  ocs sync init [--repo r] --endpoint <git url> [--name n]
+                [--ssh-key path | --token pat] [--create]
   ocs sync push [--repo r] [--session id]... [--no-push]
   ocs sync pull [--repo r] [--overwrite] [--no-pull]
   ocs sync status [--repo r]
@@ -48,6 +52,11 @@ Usage:
 Environment:
   OCS_DB     path to opencode.db (default: $XDG_DATA_HOME/opencode/opencode.db)
   OCS_REPO   path to the sync repo (default: $XDG_DATA_HOME/ocs/repo)
+  OCS_CONFIG path to ocs config.json (default: $XDG_CONFIG_HOME/ocs/config.json)
+
+Credentials (endpoint, ssh key path, or https token) are stored by ocs in its
+own config file (mode 0600) and injected into git per-command — never written
+into the sync repo's .git/config.
 `;
 
 function fail(msg: string): never {
@@ -63,7 +72,7 @@ function readTextSource(values: Record<string, unknown>): string {
   fail("provide --text or --file");
 }
 
-function main(argv: string[]): void {
+async function main(argv: string[]): Promise<void> {
   const [cmd, sub, ...rest] = argv;
   if (!cmd || cmd === "help" || cmd === "--help") {
     console.log(USAGE);
@@ -172,7 +181,7 @@ function main(argv: string[]): void {
       return;
     }
     case "sync": {
-      cmdSync(sub ?? fail("sync: missing action (push|pull|status)"), rest);
+      await cmdSync(sub ?? fail("sync: missing action (init|push|pull|status)"), rest);
       return;
     }
     case "tools": {
@@ -266,7 +275,7 @@ function cmdEdit(action: string, args: string[]): void {
   }
 }
 
-function cmdSync(action: string, args: string[]): void {
+async function cmdSync(action: string, args: string[]): Promise<void> {
   const { values } = parseArgs({
     args,
     options: {
@@ -277,11 +286,36 @@ function cmdSync(action: string, args: string[]): void {
       pull: { type: "boolean", default: true },
       "no-pull": { type: "boolean", default: false },
       overwrite: { type: "boolean", default: false },
+      endpoint: { type: "string" },
+      name: { type: "string" },
+      "ssh-key": { type: "string" },
+      token: { type: "string" },
+      create: { type: "boolean", default: false },
     },
     strict: false,
   });
   const repo = resolveRepoPath(typeof values.repo === "string" ? values.repo : undefined);
+  const credential = loadConfig().remote?.credential;
   switch (action) {
+    case "init": {
+      const endpoint = typeof values.endpoint === "string" ? values.endpoint : undefined;
+      if (!endpoint) fail("sync init: --endpoint <git url> is required");
+      const res = await syncInit({
+        endpoint,
+        ...(typeof values.name === "string" ? { name: values.name } : {}),
+        ...(typeof values["ssh-key"] === "string" ? { sshKey: values["ssh-key"] } : {}),
+        ...(typeof values.token === "string" ? { token: values.token } : {}),
+        create: values.create === true,
+        repo,
+      });
+      console.log(`git:     ${res.gitVersion}`);
+      console.log(`remote:  ${endpoint} ${res.reachable ? "(reachable)" : "(WARNING: not reachable yet)"}`);
+      if (res.created) console.log("created private GitHub repo");
+      console.log(`wired:   ${res.repo} -> origin`);
+      console.log(`config:  ${res.configPath}`);
+      console.log("next:    ocs sync push");
+      return;
+    }
     case "push": {
       const db = openStore();
       const res = syncPush(db, repo, {
@@ -289,6 +323,7 @@ function cmdSync(action: string, args: string[]): void {
           ? { sessionIds: values.session as string[] }
           : {}),
         push: values.push !== false && values["no-push"] !== true,
+        ...(credential ? { credential } : {}),
       });
       db.close();
       console.log(`exported ${res.exported.length} session(s) to ${repo}`);
@@ -298,7 +333,11 @@ function cmdSync(action: string, args: string[]): void {
     }
     case "pull": {
       const db = openStore({ write: true });
-      const res = syncPull(db, repo, { pull: values.pull !== false && values["no-pull"] !== true, overwrite: values.overwrite === true });
+      const res = syncPull(db, repo, {
+        pull: values.pull !== false && values["no-pull"] !== true,
+        overwrite: values.overwrite === true,
+        ...(credential ? { credential } : {}),
+      });
       db.close();
       if (res.pulled) console.log("pulled from remote");
       else console.log("(no remote configured; imported from local repo only)");
@@ -366,4 +405,7 @@ function cmdTools(action: string, args: string[]): void {
   }
 }
 
-main(process.argv.slice(2));
+main(process.argv.slice(2)).catch((err: unknown) => {
+  console.error(`ocs: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+});
