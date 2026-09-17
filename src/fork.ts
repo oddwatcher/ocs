@@ -54,6 +54,22 @@ function gitWorktreeAdd(dir: string, path: string, branch: string): void {
   execFileSync("git", ["-C", dir, "worktree", "add", path, branch], { stdio: "pipe" });
 }
 
+const EMPTY_TOKENS = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
+
+/**
+ * Clone a part payload. step-finish cost/tokens are zeroed so the fork does not
+ * re-bill pre-fork spend (opencode's own fork has this as open bug #31032:
+ * cloned step-finish parts re-accumulate the full original session cost).
+ */
+function clonePartData(data: string): string {
+  const parsed = JSON.parse(data) as Record<string, unknown>;
+  if (parsed.type === "step-finish") {
+    parsed.cost = 0;
+    parsed.tokens = { ...EMPTY_TOKENS };
+  }
+  return JSON.stringify(parsed);
+}
+
 /** Copy a session's rows under new ids, preserving chronological order. */
 export function copySessionRows(
   db: DatabaseSync,
@@ -70,6 +86,13 @@ export function copySessionRows(
     ...full.session,
     ...patch,
     id: newSessionId,
+    // fork starts with clean accounting; pre-fork spend belongs to the source
+    cost: 0,
+    tokens_input: 0,
+    tokens_output: 0,
+    tokens_reasoning: 0,
+    tokens_cache_read: 0,
+    tokens_cache_write: 0,
     time_created: now,
     time_updated: now,
   };
@@ -101,7 +124,7 @@ export function copySessionRows(
           session_id: newSessionId,
           time_created: p.time_created,
           time_updated: p.time_updated,
-          data: p.data,
+          data: clonePartData(p.data),
         });
         partsCopied++;
       }

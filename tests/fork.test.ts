@@ -62,6 +62,45 @@ test("fork: atMessage truncates history", () => {
   }
 });
 
+test("fork: resets cost accounting (opencode bug #31032 does not apply)", () => {
+  const fx = createFixture();
+  try {
+    const s = seedSession(fx, { cost: 1.5, tokens_input: 100, tokens_output: 50 });
+    const t = Date.now();
+    const msgId = "msg_costtest00000000000001";
+    fx.db
+      .prepare("INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)")
+      .run(msgId, s.id, t, t, JSON.stringify({ role: "assistant" }));
+    fx.db
+      .prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(
+        "prt_costtest00000000000001",
+        msgId,
+        s.id,
+        t,
+        t,
+        JSON.stringify({ type: "step-finish", cost: 1.5, tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 } } }),
+      );
+
+    const res = forkSession(fx.db, s.id);
+    const fork = getSession(fx.db, res.session.id)!;
+    assert.equal(fork.cost, 0);
+    assert.equal(fork.tokens_input, 0);
+
+    const cloned = fx.db
+      .prepare("SELECT data FROM part WHERE session_id = ? AND json_extract(data, '$.type') = 'step-finish'")
+      .get(fork.id) as { data: string };
+    const d = JSON.parse(cloned.data);
+    assert.equal(d.cost, 0);
+    assert.equal(d.tokens.input, 0);
+
+    // source untouched
+    assert.equal(getSession(fx.db, s.id)!.cost, 1.5);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("fork: withWorktree forks the working dir as git branch+worktree", () => {
   const fx = createFixture();
   const repo = join(fx.dir, "repo");
