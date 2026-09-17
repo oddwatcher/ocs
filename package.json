@@ -1,0 +1,34 @@
+{
+  "name": "ocs",
+  "version": "0.1.0",
+  "description": "Opencode session store tool: export, fork, view, edit, and git-sync opencode sessions and tooling.",
+  "type": "module",
+  "bin": {
+    "ocs": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "check": "npm test",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "keywords": [
+    "opencode",
+    "session",
+    "sync",
+    "fork",
+    "coding-agent"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^24.13.5",
+    "typescript": "^5.9.3"
+  }
+}
